@@ -173,6 +173,51 @@ async function letterFrames(page, times) {
     assert.equal(await page.evaluate(()=>S.phase),'hello');
     await context.close();
   });
+  await check('mobile greeting and wish stay above artwork with clear footer space',async()=>{
+    const {page,context,errors}=await open();
+    // Keep the existing full-story check for timing; inspect both settled headings
+    // directly here so every compact viewport does not replay the whole sequence.
+    await page.evaluate(()=>{
+      Clock.tasks.length=0; S.outT=-1; S.gust=-1;
+      S.t0=now()-CONFIG.intro.lightEnd; UI.dock('hint');
+    });
+    assert.equal(await page.evaluate(()=>[...document.querySelectorAll('#hello .ln')].map(el=>el.textContent.trim()).join(' ')),'그대, 초를 부시죠~.');
+    for(const [width,height] of [[280,360],[320,480],[320,568],[375,667],[390,844],[430,740],[568,320],[844,390]]) {
+      await page.setViewportSize({width,height});await step(page,60);
+      for(const phase of ['hello','wish']) {
+        await page.evaluate(phase=>{
+          S.phase=phase;
+          for(const id of ['hello','wish']) UI.say(id,id===phase);
+          document.querySelectorAll('#'+phase+' .ln').forEach(el=>el.classList.add('on'));
+        },phase);
+        await step(page,phase==='wish'?1600:1100);
+        const bounds=await page.evaluate(phase=>{
+          const data=octx.getImageData(0,0,off.width,off.height).data;
+          const rowHasInk=y=>{
+            for(let x=0;x<off.width;x+=2) if(data[(y*off.width+x)*4+3]>200) return true;
+            return false;
+          };
+          let first=0,last=off.height-1;
+          while(first<off.height&&!rowHasInk(first))first++;
+          while(last>=0&&!rowHasInk(last))last--;
+          const heading=document.querySelector('#'+phase+' .wrap').getBoundingClientRect();
+          const hint=document.getElementById('hintItem').getBoundingClientRect();
+          return {
+            artTop:first/DPR,artBottom:last/DPR,
+            heading:{top:heading.top,bottom:heading.bottom,left:heading.left,right:heading.right},
+            hintTop:hint.top,topInset:safeInsets[0],overflow:document.documentElement.scrollWidth>innerWidth,
+          };
+        },phase);
+        const label=`${phase} at ${width}×${height}`;
+        assert(bounds.artTop<bounds.artBottom,`drawing was not rendered: ${label}`);
+        assert(bounds.heading.bottom+12<=bounds.artTop,`heading overlaps drawing: ${label} ${JSON.stringify(bounds)}`);
+        assert(bounds.artBottom+8<=bounds.hintTop,`footer hint overlaps cake stand: ${label} ${JSON.stringify(bounds)}`);
+        assert(bounds.heading.top>=bounds.topInset+8 && bounds.heading.left>=8 && bounds.heading.right<=width-8,`heading is clipped: ${label}`);
+        assert(!bounds.overflow,`horizontal overflow: ${label}`);
+      }
+    }
+    assert.deepEqual(errors,[]);await context.close();
+  });
   for (const [width,height] of [[320,568],[390,844],[430,932],[844,390],[1440,900]]) {
     await check(`responsive composition ${width}×${height}`,async()=>{
       const {page,context,errors}=await open({width,height});
