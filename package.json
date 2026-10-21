@@ -1,0 +1,11 @@
+{
+  "name": "yujin-birthday",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A continuous, hand-drawn interactive birthday card",
+  "scripts": {
+    "start": "node server.cjs",
+    "test": "node checks/smoke.cjs"
+  },
+  "devDependencies": { "playwright": "1.62.1" }
+}
