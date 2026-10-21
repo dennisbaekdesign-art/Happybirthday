@@ -2,6 +2,12 @@
 
 A single illustrated birthday card based on the supplied `claude-v1.html`. The girl follows the **rightmost panel of the supplied three-panel reference**, as confirmed by the user.
 
+## Shared HTML preview
+
+[Open the interactive prototype](https://htmlpreview.github.io/?https://raw.githubusercontent.com/dennisbaekdesign-art/Happybirthday/main/index.html)
+
+This URL uses the third-party GitHub HTML Preview service to run the public HTML from `main`. It can be shared without keeping the local development server running. The public source returned HTTP 200 and matched the local file; the preview loader was tested locally through the complete candle-to-letter sequence. Access to the preview host itself was blocked by the cloud environment network policy, so availability of the external URL has not been independently verified here. A dedicated static host is still the documented path for a production deployment.
+
 ## Open or run
 
 `index.html` is self-contained: the illustration, handwritten letter, and subset of the Gaegu font are embedded. It works directly as a file, or on any static HTTPS host. No runtime packages, API keys, microphone, or build step are required.
