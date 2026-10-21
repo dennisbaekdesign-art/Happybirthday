@@ -5,13 +5,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const server = spawn(process.execPath, ['server.cjs'], { cwd: root, env: { ...process.env, PORT: '4173' }, stdio: 'pipe' });
-const failures = []; let passed = 0, browser;
+const failures = [], contexts = new Set(); let passed = 0, browser;
 async function check(name, fn) {
   try { await fn(); passed++; console.log(`PASS ${name}`); }
   catch (error) { failures.push(name); console.error(`FAIL ${name}: ${error.stack}`); }
+  finally { await Promise.allSettled([...contexts].map(context => context.close())); }
 }
 async function open(viewport = { width: 390, height: 844 }, extra = {}) {
   const context = await browser.newContext({ viewport, deviceScaleFactor: 2, ...extra });
+  contexts.add(context); context.on('close',()=>contexts.delete(context));
   const page = await context.newPage(), errors = [], requests = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => requests.push(request.url()));
@@ -21,6 +23,24 @@ async function open(viewport = { width: 390, height: 844 }, extra = {}) {
   return { context, page, errors, requests };
 }
 async function step(page, ms) { await page.clock.runFor(ms); }
+async function letterFrames(page, times) {
+  return page.evaluate(times => {
+    Letter.start(0);
+    return times.map(time => {
+      Letter.draw(time);
+      const cv = document.getElementById('letter'), c = cv.getContext('2d');
+      const data = c.getImageData(0,0,cv.width,cv.height).data, ratio = cv.width / cv.clientWidth;
+      let x0 = cv.width, y0 = cv.height, x1 = -1, y1 = -1, pink = 0, pinkY0 = cv.height, pinkY1 = -1;
+      for(let y=0;y<cv.height;y+=2) for(let x=0;x<cv.width;x+=2) {
+        const i=(y*cv.width+x)*4;
+        if(data[i+3]<200) continue;
+        x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y);
+        if(data[i]===238 && data[i+1]===100 && data[i+2]===147) {pink++;pinkY0=Math.min(pinkY0,y);pinkY1=Math.max(pinkY1,y);}
+      }
+      return {time,visible:x1>=0,left:x0/ratio,top:y0/ratio,right:x1/ratio,bottom:y1/ratio,pink,pinkHeight:(pinkY1-pinkY0)/ratio,width:cv.clientWidth,height:cv.clientHeight};
+    });
+  },times);
+}
 (async () => {
   await new Promise((resolve, reject) => { server.stdout.once('data', resolve); server.once('error', reject); server.once('exit', code => reject(new Error(`Server exited: ${code}`))); });
   browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || (fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined), args: ['--no-sandbox'] });
@@ -54,9 +74,9 @@ async function step(page, ms) { await page.clock.runFor(ms); }
     assert.equal(await page.locator('#again').isEnabled(), true);
     const ink = await page.evaluate(() => {
       const cv = document.getElementById('letter'), data = cv.getContext('2d').getImageData(0,0,cv.width,cv.height).data;
-      let count=0; for(let i=3;i<data.length;i+=4) if(data[i]>128) count++; return count;
+      let count=0; for(let i=0;i<data.length;i+=4) if(data[i]===238 && data[i+1]===100 && data[i+2]===147 && data[i+3]>200) count++; return count;
     });
-    assert(ink > 15000, 'actual handwritten ink must have rendered');
+    assert(ink > 6000, 'the original handwriting must render in #EE6493 on the paper');
     await page.screenshot({ path: path.join(root, 'artifacts/mobile-letter.png') });
     const run = await page.evaluate(() => S.run);
     await page.locator('#again').click();
@@ -73,6 +93,37 @@ async function step(page, ms) { await page.clock.runFor(ms); }
     assert.deepEqual(errors, []);
     assert(requests.every(url => url.startsWith('http://127.0.0.1:4173') || url.startsWith('data:')), 'no external font or asset requests');
     await context.close();
+  });
+  await check('envelope enters from below and paper emerges without frame jumps',async()=>{
+    const {page,context,errors}=await open();
+    const times=Array.from({length:193},(_,i)=>i/60);
+    const frames=await letterFrames(page,times);
+    assert.equal(frames[0].visible,false,'stationery begins fully outside the viewport');
+    const first=frames.find(f=>f.visible);
+    assert(first.top>first.height*.75,'envelope must enter at the bottom');
+    assert(frames.filter(f=>f.time<1).every(f=>f.pink===0),'no floating text before the paper emerges');
+    for(let i=1;i<frames.length;i++) {
+      const a=frames[i-1],b=frames[i];
+      if(a.visible && b.visible) assert(Math.abs(b.top-a.top)<35,`position jump at ${b.time}s`);
+    }
+    assert(frames.at(-1).top<first.top-300,'paper is fully extracted');
+    const [foldBefore,foldAfter]=await letterFrames(page,[1.049,1.051]);
+    assert(Math.abs(foldAfter.top-foldBefore.top)<3,'the flap changes depth continuously');
+    const [a,b]=await letterFrames(page,[3.2,3.216]);
+    assert(Math.abs(a.top-b.top)<1 && Math.abs(a.bottom-b.bottom)<1,'paper and envelope settle without a reset');
+    assert.deepEqual(errors,[]);await context.close();
+  });
+  await check('pink message and stationery fit portrait, landscape, and desktop',async()=>{
+    const {page,context,errors}=await open();
+    for(const [width,height] of [[320,568],[390,844],[844,390],[1440,900]]) {
+      await page.setViewportSize({width,height});await step(page,60);
+      const [f]=await letterFrames(page,[30]);
+      assert(f.visible && f.left>=3 && f.right<=width-3 && f.top>=18,`stationery is clipped at ${width}×${height}`);
+      assert(f.bottom<height-Math.min(150,height*.2),`stationery covers replay area at ${width}×${height}`);
+      assert(f.pink>300,`pink lettering missing at ${width}×${height}`);
+      assert(f.pinkHeight>Math.min(width*.45,height*.3),`last lines remain inside the envelope at ${width}×${height}`);
+    }
+    assert.deepEqual(errors,[]);await context.close();
   });
   await check('intro vignette reaches daylight without a final brightness jump', async () => {
     const {page,context}=await open();
@@ -112,8 +163,7 @@ async function step(page, ms) { await page.clock.runFor(ms); }
   await check('hidden tab pauses story, particles, and timers together', async () => {
     const {page,context}=await open();
     await step(page,5200);
-    const before=await page.evaluate(()=>now());
-    await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));});
+    const before=await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));return now();});
     await step(page,20000);
     assert.equal(await page.evaluate(()=>now()),before);
     assert.equal(await page.evaluate(()=>S.phase),'hello');

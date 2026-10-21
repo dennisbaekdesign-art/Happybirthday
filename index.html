@@ -502,7 +502,7 @@ const Letter = (() => {
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
         const i = ((y + G.y0) * iw + x + G.x0) * 4, o = (y * w + x) * 4;
         if (!d[i + 3] || Math.round(d[i] / 30) !== g) continue;
-        out.data[o] = out.data[o + 1] = out.data[o + 2] = 255; out.data[o + 3] = d[i + 3];
+        out.data[o] = 0xEE; out.data[o + 1] = 0x64; out.data[o + 2] = 0x93; out.data[o + 3] = d[i + 3];
         if (d[i + 3] > 128) ink[x]++;
       }
       gc.putImageData(out, 0, 0);
@@ -524,8 +524,40 @@ const Letter = (() => {
   };
   img.src = LETTER_SRC;
   const E = 16;   // soft leading edge, in image px
+  // All stationery shares one coordinate system and the existing paused story clock.
+  // The original letter bitmap, line order, and pen timing stay intact on the paper.
+  const stationery = {
+    width: 374, height: 190, paperWidth: 358, inkWidth: 340, padding: 12, overlap: 12,
+    arrival: reduceMotion ? .45 : 1.8,
+    flapStart: reduceMotion ? .12 : .55, flapDuration: reduceMotion ? .25 : 1.0,
+    riseStart: reduceMotion ? .24 : 1.05, riseDuration: reduceMotion ? .5 : 2.0,
+    writeDelay: reduceMotion ? .2 : 1.05,
+  };
+  // Quintic easing has zero velocity and acceleration at both ends.
+  const flow = value => { const u = clamp(value); return u * u * u * (u * (u * 6 - 15) + 10); };
+  const stationeryPart = definition => {
+    if (definition.closed === false) return P(definition);
+    // Evenly spaced edge points keep broad paper corners from bowing or clipping.
+    const points = [];
+    definition.pts.forEach((a,i,vertices) => {
+      const b = vertices[(i + 1) % vertices.length];
+      const n = Math.max(1,Math.ceil(Math.hypot(b[0] - a[0],b[1] - a[1]) / 24));
+      for (let j = 0; j < n; j++) points.push([a[0] + (b[0] - a[0]) * j / n,a[1] + (b[1] - a[1]) * j / n]);
+    });
+    return P({...definition,pts:points});
+  };
+  const flapPoints = [[-186,1],[-96,70],[0,128],[96,69],[186,0]];
+  const envelope = {
+    back: stationeryPart({kind:'paper', fillColor:'#E7DCC7', sw:1.7, seed:801, pts:[[-187,1],[-188,95],[-186,189],[0,191],[187,189],[188,93],[187,0]]}),
+    flapOuter: stationeryPart({kind:'paper', fillColor:COL.cream, sw:1.7, seed:802, pts:flapPoints}),
+    flapInner: stationeryPart({kind:'paper', fillColor:'#E7DCC7', sw:1.7, seed:802, pts:flapPoints}),
+    pocket: stationeryPart({kind:'paper', fillColor:COL.cream, sw:1.7, seed:803, pts:[[-187,0],[-188,95],[-186,189],[0,191],[187,189],[188,95],[187,0],[98,55],[0,106],[-98,55]]}),
+    leftSeam: stationeryPart({kind:'line', closed:false, sw:1.2, color:'#B9AD96', seed:804, pts:[[-184,187],[-95,144],[-13,101]]}),
+    rightSeam: stationeryPart({kind:'line', closed:false, sw:1.2, color:'#B9AD96', seed:805, pts:[[185,187],[95,143],[13,100]]}),
+  };
+  let paper = null;
   return {
-    get duration() { return duration || 14; },
+    get duration() { return (duration || 14) + stationery.writeDelay; },
     start(now) { t0 = now; },
     reset() { t0 = -1; lc.setTransform(1, 0, 0, 1, 0, 0); lc.clearRect(0, 0, cv.width, cv.height); },
     draw(now) {
@@ -533,12 +565,42 @@ const Letter = (() => {
       if (cv.width !== Math.round(cw * DPR) || cv.height !== Math.round(ch * DPR)) { cv.width = Math.round(cw * DPR); cv.height = Math.round(ch * DPR); }
       lc.setTransform(1, 0, 0, 1, 0, 0); lc.clearRect(0, 0, cv.width, cv.height);
       if (!ready || t0 < 0) return;
-      const top = safeInsets[0] + 24, bottom = ch - Math.min(150, ch * .2) - safeInsets[1], side = 22;
-      const sc = Math.min((cw - side * 2) / iw, (bottom - top) / ih);
-      const ox = (cw - iw * sc) / 2, oy = top + (bottom - top - ih * sc) / 2;
-      lc.setTransform(DPR * sc, 0, 0, DPR * sc, DPR * ox, DPR * oy);
+      const C = stationery, elapsed = Math.max(0, now - t0);
+      const inkHeight = ih / iw * C.inkWidth, paperHeight = inkHeight + C.padding * 2;
+      const top = safeInsets[0] + 24, bottom = ch - Math.min(150, ch * .2) - safeInsets[1] - 4;
+      const fullHeight = paperHeight + C.height - C.overlap;
+      const scale = Math.min((cw - 16) / C.width, (bottom - top) / fullHeight);
+      const finalTop = top + (bottom - top - fullHeight * scale) / 2;
+      const envelopeY = finalTop + (paperHeight - C.overlap) * scale;
+      const arrival = flow(elapsed / C.arrival);
+      const flap = flow((elapsed - C.flapStart) / C.flapDuration);
+      const rise = flow((elapsed - C.riseStart) / C.riseDuration);
+      const y = envelopeY + (ch + C.height * scale + 24 - envelopeY) * (1 - arrival);
+      const roll = reduceMotion ? 0 : -.045 * (1 - arrival);
+      const paperY = C.height * .6 + (-paperHeight + C.overlap - C.height * .6) * rise;
+      const flapScale = Math.cos(Math.PI * flap);
+      lc.setTransform(DPR,0,0,DPR,0,0);
+      lc.translate(cw / 2,y); lc.rotate(roll); lc.scale(scale,scale);
       lc.imageSmoothingQuality = 'high';
-      const el0 = now - t0;
+      const drawFlap = inside => {
+        lc.save(); lc.scale(1,flapScale);
+        (inside ? envelope.flapInner : envelope.flapOuter).draw(lc,0);
+        lc.restore();
+      };
+      // A folding flap changes depth only when its projected area reaches zero.
+      if (flapScale < 0) drawFlap(true);
+      envelope.back.draw(lc,0);
+      lc.save();
+      // The lower edge stays inside the same pocket throughout the extraction.
+      lc.beginPath(); lc.rect(-C.width / 2,-paperHeight - 160,C.width,paperHeight + 160 + C.height - 3); lc.clip();
+      lc.translate(0,paperY + paperHeight);
+      lc.rotate(reduceMotion ? 0 : .014 * Math.sin(Math.PI * rise));
+      lc.translate(-C.paperWidth / 2,-paperHeight);
+      if (!paper) paper = stationeryPart({kind:'paper',fillColor:'#FFF8EA',sw:1.5,seed:806,pts:[[.4,.6],[C.paperWidth * .5,-.3],[C.paperWidth,.8],[C.paperWidth -.4,paperHeight],[C.paperWidth * .5,paperHeight + .4],[.3,paperHeight - .3]]});
+      paper.draw(lc,0);
+      lc.save(); lc.translate((C.paperWidth - C.inkWidth) / 2,C.padding);
+      lc.scale(C.inkWidth / iw,C.inkWidth / iw);
+      const el0 = elapsed - C.writeDelay;
       for (const p of plan) {
         const el = el0 - p.start, G = p.g; if (el <= 0) continue;
         const T = G.times; let xr;
@@ -554,6 +616,10 @@ const Letter = (() => {
         }
         lc.globalAlpha = 1;
       }
+      lc.restore(); lc.restore();
+      envelope.pocket.draw(lc,0);
+      envelope.leftSeam.draw(lc,0); envelope.rightSeam.draw(lc,0);
+      if (flapScale >= 0) drawFlap(false);
     },
   };
 })();
